@@ -1,13 +1,9 @@
 import StoreKit
 
-public enum InAppPurchaseStatus {
-    case purchasing, purchased, restored, failed
-}
-
-public protocol InAppPurchaseDelegate {
-    func purchaseFail(error: String) -> Void
+public protocol InAppPurchaseDelegate: AnyObject {
+    func purchaseFail(error: TransactionAuthError) -> Void
     func purchaseStatus(status: InAppPurchaseStatus) -> Void
-    func purchaseSuccess(receipt: String, transaction: SKPaymentTransaction) -> Void
+    func purchaseSuccess(receipt: String?, transaction: SKPaymentTransaction) -> Void
 }
 
 fileprivate typealias CompletionHandler = (([SKProduct]) -> Void)
@@ -15,7 +11,7 @@ fileprivate typealias CompletionHandler = (([SKProduct]) -> Void)
 public class InAppPurchase: NSObject {
     private var products = [SKProduct]()
     private var productsId: Set<String>?
-    private var delegate: InAppPurchaseDelegate?
+    private weak var delegate: InAppPurchaseDelegate?
     private var completionHandler: CompletionHandler?
     
     public convenience init(productsId: Set<String>, delegate: InAppPurchaseDelegate) {
@@ -23,7 +19,7 @@ public class InAppPurchase: NSObject {
         self.delegate = delegate
         self.productsId = productsId
         fetchProducts { products in
-            print("Total Products: \(products.count)")
+            debugPrint("Total Products: \(products.count)")
         }
         SKPaymentQueue.default().add(self)
     }
@@ -39,20 +35,20 @@ public class InAppPurchase: NSObject {
         let payment = SKPayment(product: firstProduct)
         SKPaymentQueue.default().add(payment)
       } else {
-          self.delegate?.purchaseFail(error: kInvalidProductIdentifier)
+          self.delegate?.purchaseFail(error: .invalidProductIdentifier)
       }
     }
     
-    private func getReceipt() -> String {
-      guard let receiptUrl = Bundle.main.appStoreReceiptURL else { return "" }
+    private func getReceipt() -> String? {
+        guard let receiptUrl = Bundle.main.appStoreReceiptURL else { return nil }
       do {
         let receiptData = try NSData(contentsOf: receiptUrl,
                                      options: NSData.ReadingOptions.alwaysMapped)
         let receipt = receiptData.base64EncodedString(options: [])
         return receipt
       } catch(let e) {
-        print(e.localizedDescription)
-        return ""
+        debugPrint(e.localizedDescription)
+        return nil
       }
     }
 
@@ -63,7 +59,7 @@ extension InAppPurchase: SKProductsRequestDelegate {
     public func productsRequest(_ request: SKProductsRequest, didReceive response: SKProductsResponse) {
         let allProducts = response.products
         if allProducts.isEmpty {
-            self.delegate?.purchaseFail(error: kThereAreNoValidProductsAvaliable)
+            self.delegate?.purchaseFail(error: .noValidProductsAvailable)
         } else {
             self.products = allProducts
             self.completionHandler?(products)
@@ -73,7 +69,7 @@ extension InAppPurchase: SKProductsRequestDelegate {
     
     private func fetchProducts(completion: @escaping CompletionHandler) {
         guard let productsId = self.productsId else {
-            self.delegate?.purchaseFail(error: kProductsIdNotFound)
+            self.delegate?.purchaseFail(error: .productIdNotFound)
             return
         }
         self.completionHandler = completion
@@ -90,24 +86,20 @@ extension InAppPurchase: SKPaymentTransactionObserver {
             switch transaction.transactionState {
             case .purchasing:
                 self.delegate?.purchaseStatus(status: .purchasing)
-            case .purchased:
+            case .purchased, .restored:
                 self.delegate?.purchaseStatus(status: .purchased)
                 self.delegate?.purchaseSuccess(receipt: getReceipt(), transaction: transaction)
                 SKPaymentQueue.default().finishTransaction(transaction)
-            case .failed:
+            case .failed, .deferred:
                 self.delegate?.purchaseStatus(status: .failed)
-                self.delegate?.purchaseFail(error: transaction.error?.localizedDescription ?? kTransactionHasBeenFailed)
-                SKPaymentQueue.default().finishTransaction(transaction)
-            case .restored:
-                self.delegate?.purchaseSuccess(receipt: getReceipt(), transaction: transaction)
-                self.delegate?.purchaseStatus(status: .restored)
-                SKPaymentQueue.default().finishTransaction(transaction)
-            case .deferred:
-                self.delegate?.purchaseStatus(status: .failed)
-                self.delegate?.purchaseFail(error: transaction.error?.localizedDescription ?? kTransactionHasBeenFailed)
+                guard let error = transaction.error else {
+                    self.delegate?.purchaseFail(error: .transactionFailed)
+                    return
+                }
+                self.delegate?.purchaseFail(error: TransactionAuthError(rawValue: error.localizedDescription) ?? .transactionFailed)
                 SKPaymentQueue.default().finishTransaction(transaction)
             default:
-                print("Something went wrong!")
+                self.delegate?.purchaseFail(error: .unknown)
                 break
             }
         }
